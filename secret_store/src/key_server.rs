@@ -138,7 +138,7 @@ impl MessageSigner for KeyServerImpl {
 			.map_err(|_| Error::BadSignature)?;
 
 		// sign message
-		let signing_session = self.data.lock().cluster.new_signing_session(key_id.clone(), signature.clone(), None, message)?;
+		let signing_session = self.data.lock().cluster.new_schnorr_signing_session(key_id.clone(), signature.clone(), None, message)?;
 		let message_signature = signing_session.wait()?;
 
 		// compose two message signature components into single one
@@ -444,7 +444,7 @@ pub mod tests {
 	}
 
 	#[test]
-	fn signing_session_is_delegated_when_node_does_not_have_key_share() {
+	fn schnorr_signing_session_is_delegated_when_node_does_not_have_key_share() {
 		//::logger::init_log();
 		let key_servers = make_key_servers(6114, 3);
 		let threshold = 1;

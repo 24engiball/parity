@@ -29,8 +29,8 @@ use key_server_cluster::generation_session::{SessionImpl as GenerationSessionImp
 use key_server_cluster::decryption_session::{SessionImpl as DecryptionSessionImpl,
 	SessionParams as DecryptionSessionParams};
 use key_server_cluster::encryption_session::{SessionImpl as EncryptionSessionImpl, SessionParams as EncryptionSessionParams};
-use key_server_cluster::signing_session::{SessionImpl as SigningSessionImpl,
-	SessionParams as SigningSessionParams};
+use key_server_cluster::signing_session_schnorr::{SessionImpl as SchnorrSigningSessionImpl,
+	SessionParams as SchnorrSigningSessionParams};
 use key_server_cluster::share_add_session::{SessionImpl as ShareAddSessionImpl,
 	SessionParams as ShareAddSessionParams, IsolatedSessionTransport as ShareAddTransport};
 use key_server_cluster::servers_set_change_session::{SessionImpl as ServersSetChangeSessionImpl,
@@ -241,12 +241,12 @@ impl ClusterSessionCreator<DecryptionSessionImpl, Signature> for DecryptionSessi
 }
 
 /// Signing session creator.
-pub struct SigningSessionCreator {
+pub struct SchnorrSigningSessionCreator {
 	/// Creator core.
 	pub core: Arc<SessionCreatorCore>,
 }
 
-impl ClusterSessionCreator<SigningSessionImpl, Signature> for SigningSessionCreator {
+impl ClusterSessionCreator<SchnorrSigningSessionImpl, Signature> for SchnorrSigningSessionCreator {
 	fn creation_data_from_message(message: &Message) -> Result<Option<Signature>, Error> {
 		match *message {
 			Message::Signing(SigningMessage::SigningConsensusMessage(ref message)) => match &message.message {
@@ -267,10 +267,10 @@ impl ClusterSessionCreator<SigningSessionImpl, Signature> for SigningSessionCrea
 		}))
 	}
 
-	fn create(&self, cluster: Arc<Cluster>, master: NodeId, nonce: Option<u64>, id: SessionIdWithSubSession, requester_signature: Option<Signature>) -> Result<Arc<SigningSessionImpl>, Error> {
+	fn create(&self, cluster: Arc<Cluster>, master: NodeId, nonce: Option<u64>, id: SessionIdWithSubSession, requester_signature: Option<Signature>) -> Result<Arc<SchnorrSigningSessionImpl>, Error> {
 		let encrypted_data = self.core.read_key_share(&id.id)?;
 		let nonce = self.core.check_session_nonce(&master, nonce)?;
-		Ok(Arc::new(SigningSessionImpl::new(SigningSessionParams {
+		Ok(Arc::new(SchnorrSigningSessionImpl::new(SchnorrSigningSessionParams {
 			meta: SessionMeta {
 				id: id.id,
 				self_node_id: self.core.self_node_id.clone(),

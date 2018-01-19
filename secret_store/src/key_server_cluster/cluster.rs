@@ -36,7 +36,7 @@ use key_server_cluster::message::{self, Message, ClusterMessage};
 use key_server_cluster::generation_session::{SessionImpl as GenerationSession};
 use key_server_cluster::decryption_session::{SessionImpl as DecryptionSession};
 use key_server_cluster::encryption_session::{SessionImpl as EncryptionSession};
-use key_server_cluster::signing_session::{SessionImpl as SigningSession};
+use key_server_cluster::signing_session_schnorr::{SessionImpl as SchnorrSigningSession};
 use key_server_cluster::key_version_negotiation_session::{SessionImpl as KeyVersionNegotiationSession,
 	IsolatedSessionTransport as KeyVersionNegotiationSessionTransport, ContinueAction};
 use key_server_cluster::io::{DeadlineStatus, ReadMessage, SharedTcpStream, read_encrypted_message, WriteMessage, write_encrypted_message};
@@ -71,7 +71,7 @@ pub trait ClusterClient: Send + Sync {
 	/// Start new decryption session.
 	fn new_decryption_session(&self, session_id: SessionId, requestor_signature: Signature, version: Option<H256>, is_shadow_decryption: bool) -> Result<Arc<DecryptionSession>, Error>;
 	/// Start new signing session.
-	fn new_signing_session(&self, session_id: SessionId, requestor_signature: Signature, version: Option<H256>, message_hash: H256) -> Result<Arc<SigningSession>, Error>;
+	fn new_schnorr_signing_session(&self, session_id: SessionId, requestor_signature: Signature, version: Option<H256>, message_hash: H256) -> Result<Arc<SchnorrSigningSession>, Error>;
 	/// Start new key version negotiation session.
 	fn new_key_version_negotiation_session(&self, session_id: SessionId) -> Result<Arc<KeyVersionNegotiationSession<KeyVersionNegotiationSessionTransport>>, Error>;
 	/// Start new servers set change session.
@@ -441,7 +441,7 @@ impl ClusterCore {
 				.map(|_| ()).unwrap_or_default(),
 			Message::Decryption(message) => Self::process_message(&data, &data.sessions.decryption_sessions, connection, Message::Decryption(message))
 				.map(|_| ()).unwrap_or_default(),
-			Message::Signing(message) => Self::process_message(&data, &data.sessions.signing_sessions, connection, Message::Signing(message))
+			Message::Signing(message) => Self::process_message(&data, &data.sessions.schnorr_signing_sessions, connection, Message::Signing(message))
 				.map(|_| ()).unwrap_or_default(),
 			Message::ServersSetChange(message) => {
 				let message = Message::ServersSetChange(message);
@@ -484,7 +484,7 @@ impl ClusterCore {
 								data.sessions.decryption_sessions.remove(&session.id());
 							}
 						},
-						Some(ContinueAction::Sign(session, message_hash)) => {
+						Some(ContinueAction::SchnorrSign(session, message_hash)) => {
 							let initialization_error = if data.self_key_pair.public() == &master {
 								session.initialize(version, message_hash)
 							} else {
@@ -493,7 +493,7 @@ impl ClusterCore {
 
 							if let Err(error) = initialization_error {
 								session.on_session_error(&meta.self_node_id, error);
-								data.sessions.signing_sessions.remove(&session.id());
+								data.sessions.schnorr_signing_sessions.remove(&session.id());
 							}
 						},
 						None => (),
@@ -503,8 +503,8 @@ impl ClusterCore {
 							data.sessions.decryption_sessions.remove(&session.id());
 							session.on_session_error(&meta.self_node_id, error);
 						},
-						Some(ContinueAction::Sign(session, _)) => {
-							data.sessions.signing_sessions.remove(&session.id());
+						Some(ContinueAction::SchnorrSign(session, _)) => {
+							data.sessions.schnorr_signing_sessions.remove(&session.id());
 							session.on_session_error(&meta.self_node_id, error);
 						},
 						None => (),
@@ -939,21 +939,21 @@ impl ClusterClient for ClusterClientImpl {
 		}
 	}
 
-	fn new_signing_session(&self, session_id: SessionId, requestor_signature: Signature, version: Option<H256>, message_hash: H256) -> Result<Arc<SigningSession>, Error> {
+	fn new_schnorr_signing_session(&self, session_id: SessionId, requestor_signature: Signature, version: Option<H256>, message_hash: H256) -> Result<Arc<SchnorrSigningSession>, Error> {
 		let mut connected_nodes = self.data.connections.connected_nodes();
 		connected_nodes.insert(self.data.self_key_pair.public().clone());
 
 		let access_key = Random.generate()?.secret().clone();
 		let session_id = SessionIdWithSubSession::new(session_id, access_key);
 		let cluster = create_cluster_view(&self.data, false)?;
-		let session = self.data.sessions.signing_sessions.insert(cluster, self.data.self_key_pair.public().clone(), session_id.clone(), None, false, Some(requestor_signature))?;
+		let session = self.data.sessions.schnorr_signing_sessions.insert(cluster, self.data.self_key_pair.public().clone(), session_id.clone(), None, false, Some(requestor_signature))?;
 
 		let initialization_result = match version {
 			Some(version) => session.initialize(version, message_hash),
 			None => {
 				self.create_key_version_negotiation_session(session_id.id.clone())
 					.map(|version_session| {
-						version_session.set_continue_action(ContinueAction::Sign(session.clone(), message_hash));
+						version_session.set_continue_action(ContinueAction::SchnorrSign(session.clone(), message_hash));
 						ClusterCore::try_continue_session(&self.data, Some(version_session));
 					})
 			},
@@ -962,7 +962,7 @@ impl ClusterClient for ClusterClientImpl {
 		match initialization_result {
 			Ok(()) => Ok(session),
 			Err(error) => {
-				self.data.sessions.signing_sessions.remove(&session.id());
+				self.data.sessions.schnorr_signing_sessions.remove(&session.id());
 				Err(error)
 			},
 		}
@@ -1047,7 +1047,7 @@ pub mod tests {
 	use key_server_cluster::generation_session::{SessionImpl as GenerationSession, SessionState as GenerationSessionState};
 	use key_server_cluster::decryption_session::{SessionImpl as DecryptionSession};
 	use key_server_cluster::encryption_session::{SessionImpl as EncryptionSession};
-	use key_server_cluster::signing_session::{SessionImpl as SigningSession};
+	use key_server_cluster::signing_session_schnorr::{SessionImpl as SchnorrSigningSession};
 	use key_server_cluster::key_version_negotiation_session::{SessionImpl as KeyVersionNegotiationSession,
 		IsolatedSessionTransport as KeyVersionNegotiationSessionTransport};
 
@@ -1071,7 +1071,7 @@ pub mod tests {
 		fn new_generation_session(&self, _session_id: SessionId, _author: Public, _threshold: usize) -> Result<Arc<GenerationSession>, Error> { unimplemented!("test-only") }
 		fn new_encryption_session(&self, _session_id: SessionId, _requestor_signature: Signature, _common_point: Public, _encrypted_point: Public) -> Result<Arc<EncryptionSession>, Error> { unimplemented!("test-only") }
 		fn new_decryption_session(&self, _session_id: SessionId, _requestor_signature: Signature, _version: Option<H256>, _is_shadow_decryption: bool) -> Result<Arc<DecryptionSession>, Error> { unimplemented!("test-only") }
-		fn new_signing_session(&self, _session_id: SessionId, _requestor_signature: Signature, _version: Option<H256>, _message_hash: H256) -> Result<Arc<SigningSession>, Error> { unimplemented!("test-only") }
+		fn new_schnorr_signing_session(&self, _session_id: SessionId, _requestor_signature: Signature, _version: Option<H256>, _message_hash: H256) -> Result<Arc<SchnorrSigningSession>, Error> { unimplemented!("test-only") }
 		fn new_key_version_negotiation_session(&self, _session_id: SessionId) -> Result<Arc<KeyVersionNegotiationSession<KeyVersionNegotiationSessionTransport>>, Error> { unimplemented!("test-only") }
 		fn new_servers_set_change_session(&self, _session_id: Option<SessionId>, _migration_id: Option<H256>, _new_nodes_set: BTreeSet<NodeId>, _old_set_signature: Signature, _new_set_signature: Signature) -> Result<Arc<AdminSession>, Error> { unimplemented!("test-only") }
 
@@ -1329,7 +1329,7 @@ pub mod tests {
 	}
 
 	#[test]
-	fn signing_session_completes_if_node_does_not_have_a_share() {
+	fn schnorr_signing_session_completes_if_node_does_not_have_a_share() {
 		//::logger::init_log();
 		let mut core = Core::new().unwrap();
 		let clusters = make_clusters(&core, 6028, 3);
@@ -1349,19 +1349,19 @@ pub mod tests {
 
 		// and try to sign message with generated key
 		let signature = sign(Random.generate().unwrap().secret(), &Default::default()).unwrap();
-		let session0 = clusters[0].client().new_signing_session(Default::default(), signature, None, Default::default()).unwrap();
-		let session = clusters[0].data.sessions.signing_sessions.first().unwrap();
+		let session0 = clusters[0].client().new_schnorr_signing_session(Default::default(), signature, None, Default::default()).unwrap();
+		let session = clusters[0].data.sessions.schnorr_signing_sessions.first().unwrap();
 
 		loop_until(&mut core, time::Duration::from_millis(300), || session.is_finished() && (0..3).all(|i|
-			clusters[i].data.sessions.signing_sessions.is_empty()));
+			clusters[i].data.sessions.schnorr_signing_sessions.is_empty()));
 		session0.wait().unwrap();
 
 		// and try to sign message with generated key using node that has no key share
 		let signature = sign(Random.generate().unwrap().secret(), &Default::default()).unwrap();
-		let session2 = clusters[2].client().new_signing_session(Default::default(), signature, None, Default::default()).unwrap();
-		let session = clusters[2].data.sessions.signing_sessions.first().unwrap();
+		let session2 = clusters[2].client().new_schnorr_signing_session(Default::default(), signature, None, Default::default()).unwrap();
+		let session = clusters[2].data.sessions.schnorr_signing_sessions.first().unwrap();
 		loop_until(&mut core, time::Duration::from_millis(300), || session.is_finished()  && (0..3).all(|i|
-			clusters[i].data.sessions.signing_sessions.is_empty()));
+			clusters[i].data.sessions.schnorr_signing_sessions.is_empty()));
 		session2.wait().unwrap();
 
 		// now remove share from node1
@@ -1369,8 +1369,8 @@ pub mod tests {
 
 		// and try to sign message with generated key
 		let signature = sign(Random.generate().unwrap().secret(), &Default::default()).unwrap();
-		let session1 = clusters[0].client().new_signing_session(Default::default(), signature, None, Default::default()).unwrap();
-		let session = clusters[0].data.sessions.signing_sessions.first().unwrap();
+		let session1 = clusters[0].client().new_schnorr_signing_session(Default::default(), signature, None, Default::default()).unwrap();
+		let session = clusters[0].data.sessions.schnorr_signing_sessions.first().unwrap();
 		loop_until(&mut core, time::Duration::from_millis(300), || session.is_finished());
 		session1.wait().unwrap_err();
 	}

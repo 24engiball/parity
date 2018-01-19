@@ -29,10 +29,10 @@ use key_server_cluster::message::{Message, SigningMessage, SigningConsensusMessa
 	InitializeConsensusSession, ConfirmConsensusInitialization, SigningSessionDelegation, SigningSessionDelegationCompleted};
 use key_server_cluster::jobs::job_session::JobTransport;
 use key_server_cluster::jobs::key_access_job::KeyAccessJob;
-use key_server_cluster::jobs::signing_job::{PartialSigningRequest, PartialSigningResponse, SigningJob};
+use key_server_cluster::jobs::signing_job_schnorr::{PartialSigningRequest, PartialSigningResponse, SigningJob};
 use key_server_cluster::jobs::consensus_session::{ConsensusSessionParams, ConsensusSessionState, ConsensusSession};
 
-/// Distributed signing session.
+/// Distributed Schnorr-signing session.
 /// Based on "Efficient Multi-Party Digital Signature using Adaptive Secret Sharing for Low-Power Devices in Wireless Network" paper.
 /// Brief overview:
 /// 1) initialization: master node (which has received request for signing the message) requests all other nodes to sign the message
@@ -809,7 +809,7 @@ mod tests {
 	use key_server_cluster::math;
 	use key_server_cluster::message::{Message, SigningMessage, SigningConsensusMessage, ConsensusMessage, ConfirmConsensusInitialization,
 		SigningGenerationMessage, GenerationMessage, ConfirmInitialization, InitializeSession, RequestPartialSignature};
-	use key_server_cluster::signing_session::{SessionImpl, SessionState, SessionParams};
+	use key_server_cluster::signing_session_schnorr::{SessionImpl, SessionState, SessionParams};
 
 	struct Node {
 		pub node_id: NodeId,
