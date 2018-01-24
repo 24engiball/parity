@@ -441,8 +441,9 @@ impl ClusterCore {
 				.map(|_| ()).unwrap_or_default(),
 			Message::Decryption(message) => Self::process_message(&data, &data.sessions.decryption_sessions, connection, Message::Decryption(message))
 				.map(|_| ()).unwrap_or_default(),
-			Message::Signing(message) => Self::process_message(&data, &data.sessions.schnorr_signing_sessions, connection, Message::Signing(message))
+			Message::SchnorrSigning(message) => Self::process_message(&data, &data.sessions.schnorr_signing_sessions, connection, Message::SchnorrSigning(message))
 				.map(|_| ()).unwrap_or_default(),
+			Message::EcdsaSigning(_) => unimplemented!("TODO"),
 			Message::ServersSetChange(message) => {
 				let message = Message::ServersSetChange(message);
 				let is_initialization_message = message.is_initialization_message();
@@ -886,7 +887,7 @@ impl ClusterClient for ClusterClientImpl {
 
 		let cluster = create_cluster_view(&self.data, true)?;
 		let session = self.data.sessions.generation_sessions.insert(cluster, self.data.self_key_pair.public().clone(), session_id, None, false, None)?;
-		match session.initialize(author, threshold, connected_nodes) {
+		match session.initialize(author, false, threshold, connected_nodes) {
 			Ok(()) => Ok(session),
 			Err(error) => {
 				self.data.sessions.generation_sessions.remove(&session.id());

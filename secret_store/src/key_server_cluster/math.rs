@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use ethkey::{Public, Secret, Random, Generator, math};
+use ethkey::{Public, Secret, Signature, Random, Generator, math};
 use ethereum_types::{H256, U256};
 use hash::keccak;
 use key_server_cluster::Error;
@@ -28,12 +28,17 @@ pub struct EncryptedSecret {
 	pub encrypted_point: Public,
 }
 
-/// Generate random scalar
+/// Create zero scalar.
+pub fn zero_scalar() -> Secret {
+	Secret::zero()
+}
+
+/// Generate random scalar.
 pub fn generate_random_scalar() -> Result<Secret, Error> {
 	Ok(Random.generate()?.secret().clone())
 }
 
-/// Generate random point
+/// Generate random point.
 pub fn generate_random_point() -> Result<Public, Error> {
 	Ok(Random.generate()?.public().clone())
 }
@@ -54,6 +59,13 @@ pub fn compute_secret_sum<'a, I>(mut secrets: I) -> Result<Secret, Error> where 
 		sum.add(secret)?;
 	}
 	Ok(sum)
+}
+
+/// Compute secrets multiplication.
+pub fn compute_secret_mul(secret1: &Secret, secret2: &Secret) -> Result<Secret, Error> {
+	let mut secret_mul = secret1.clone();
+	secret_mul.mul(secret2)?;
+	Ok(secret_mul)
 }
 
 /// Compute secrets 'shadow' multiplication: coeff * multiplication(s[j] / (s[i] - s[j])) for every i != j
@@ -199,7 +211,6 @@ pub fn compute_joint_secret<'a, I>(secret_coeffs: I) -> Result<Secret, Error> wh
 }
 
 /// Compute joint secret key from t+1 secret shares.
-#[cfg(test)]
 pub fn compute_joint_secret_from_shares<'a>(t: usize, secret_shares: &[&'a Secret], id_numbers: &[&'a Secret]) -> Result<Secret, Error> {
 	let secret_share_0 = secret_shares[0];
 	let id_number_0 = id_numbers[0];
@@ -350,8 +361,8 @@ pub fn combine_message_hash_with_public(message_hash: &H256, public: &Public) ->
 	Ok(hash)
 }
 
-/// Compute signature share.
-pub fn compute_signature_share<'a, I>(threshold: usize, combined_hash: &Secret, one_time_secret_coeff: &Secret, node_secret_share: &Secret, node_number: &Secret, other_nodes_numbers: I)
+/// Compute Schnorr signature share.
+pub fn compute_schnorr_signature_share<'a, I>(threshold: usize, combined_hash: &Secret, one_time_secret_coeff: &Secret, node_secret_share: &Secret, node_number: &Secret, other_nodes_numbers: I)
 	-> Result<Secret, Error> where I: Iterator<Item=&'a Secret> {
 	let mut sum = one_time_secret_coeff.clone();
 	let mut subtrahend = compute_shadow_mul(combined_hash, node_number, other_nodes_numbers)?;
@@ -364,8 +375,8 @@ pub fn compute_signature_share<'a, I>(threshold: usize, combined_hash: &Secret, 
 	Ok(sum)
 }
 
-/// Check signature share.
-pub fn _check_signature_share<'a, I>(_combined_hash: &Secret, _signature_share: &Secret, _public_share: &Public, _one_time_public_share: &Public, _node_numbers: I)
+/// Check Schnorr signature share.
+pub fn _check_schnorr_signature_share<'a, I>(_combined_hash: &Secret, _signature_share: &Secret, _public_share: &Public, _one_time_public_share: &Public, _node_numbers: I)
 	-> Result<bool, Error> where I: Iterator<Item=&'a Secret> {
 	// TODO [Trust]: in paper partial signature is checked using comparison:
 	//    sig[i] * T                                  = r[i] - c * lagrange_coeff(i) * y[i]
@@ -384,14 +395,14 @@ pub fn _check_signature_share<'a, I>(_combined_hash: &Secret, _signature_share: 
 	Ok(true)
 }
 
-/// Compute signature.
-pub fn compute_signature<'a, I>(signature_shares: I) -> Result<Secret, Error> where I: Iterator<Item=&'a Secret> {
+/// Compute Schnorr signature.
+pub fn compute_schnorr_signature<'a, I>(signature_shares: I) -> Result<Secret, Error> where I: Iterator<Item=&'a Secret> {
 	compute_secret_sum(signature_shares)
 }
 
 /// Locally compute Schnorr signature as described in https://en.wikipedia.org/wiki/Schnorr_signature#Signing.
 #[cfg(test)]
-pub fn local_compute_signature(nonce: &Secret, secret: &Secret, message_hash: &Secret) -> Result<(Secret, Secret), Error> {
+pub fn local_compute_schnorr_signature(nonce: &Secret, secret: &Secret, message_hash: &Secret) -> Result<(Secret, Secret), Error> {
 	let mut nonce_public = math::generation_point();
 	math::public_mul_secret(&mut nonce_public, &nonce).unwrap();
 
@@ -405,9 +416,9 @@ pub fn local_compute_signature(nonce: &Secret, secret: &Secret, message_hash: &S
 	Ok((combined_hash, sig))
 }
 
-/// Verify signature as described in https://en.wikipedia.org/wiki/Schnorr_signature#Verifying.
+/// Verify Schnorr signature as described in https://en.wikipedia.org/wiki/Schnorr_signature#Verifying.
 #[cfg(test)]
-pub fn verify_signature(public: &Public, signature: &(Secret, Secret), message_hash: &H256) -> Result<bool, Error> {
+pub fn verify_schnorr_signature(public: &Public, signature: &(Secret, Secret), message_hash: &H256) -> Result<bool, Error> {
 	let mut addendum = math::generation_point();
 	math::public_mul_secret(&mut addendum, &signature.1)?;
 	let mut nonce_public = public.clone();
@@ -417,6 +428,105 @@ pub fn verify_signature(public: &Public, signature: &(Secret, Secret), message_h
 	let combined_hash = combine_message_hash_with_public(message_hash, &nonce_public)?;
 	Ok(combined_hash == signature.0)
 }
+
+/// Compute R part of ECDSA signature.
+pub fn compute_ecdsa_r(nonce_public: &Public) -> Result<Secret, Error> {
+	let signature_r = &nonce_public[0..32];
+	let signature_r: U256 = signature_r.into();
+	let signature_r: H256 = (signature_r % math::curve_order()).into();
+	let signature_r = Secret::from_slice(&*signature_r);
+	signature_r.check_validity()?;
+	Ok(signature_r)
+}
+
+/// Compute share of S part of ECDSA signature.
+pub fn compute_ecdsa_s_share(inv_nonce_share: &Secret, inv_nonce_mul_secret: &Secret, signature_r: &Secret, message_hash: &H256) -> Result<Secret, Error> {
+	let message_hash: U256 = message_hash.clone().into();
+	let message_hash: H256 = (message_hash % math::curve_order()).into();
+	let message_hash = Secret::from_slice(&*message_hash);
+	message_hash.check_validity()?;
+
+	let mut nonce_inv_share_mul_message_hash = inv_nonce_share.clone();
+	nonce_inv_share_mul_message_hash.mul(&message_hash.clone().into())?;
+
+	let mut nonce_inv_share_mul_secret_share_mul_r = inv_nonce_mul_secret.clone();
+	nonce_inv_share_mul_secret_share_mul_r.mul(signature_r)?;
+
+	let mut signature_s_share = nonce_inv_share_mul_message_hash;
+	signature_s_share.add(&nonce_inv_share_mul_secret_share_mul_r)?;
+
+	Ok(signature_s_share)
+}
+
+/// Compute S part of ECDSA signature from shares.
+pub fn compute_ecdsa_s(t: usize, signature_s_shares: &[Secret], id_numbers: &[Secret]) -> Result<Secret, Error> {
+	let double_t = t * 2;
+	debug_assert!(signature_s_shares.len() >= double_t + 1);
+	debug_assert!(id_numbers.len() >= double_t + 1);
+	debug_assert_eq!(signature_s_shares.len(), id_numbers.len());
+
+	compute_joint_secret_from_shares(double_t,
+		&signature_s_shares.iter().take(double_t + 1).collect::<Vec<_>>(),
+		&id_numbers.iter().take(double_t + 1).collect::<Vec<_>>())
+}
+
+/// Serialize ECDSA signature to [r][s]v form.
+pub fn serialize_ecdsa_signature(nonce_public: &Public, signature_r: Secret, mut signature_s: Secret) -> Signature {
+	// compute recvery param
+	let mut signature_v = {
+		let nonce_public_x = &nonce_public[0..32];
+		let nonce_public_x: U256 = nonce_public_x.into();
+		let nonce_public_x: H256 = nonce_public_x.into();
+		let nonce_public_y = &nonce_public[32..64];
+		let nonce_public_y: U256 = nonce_public_y.into();
+		let nonce_public_y_is_odd = !(nonce_public_y % 2.into()).is_zero();
+		let bit0 = if nonce_public_y_is_odd { 1u8 } else { 0u8 };
+		let bit1 = if nonce_public_x != *signature_r { 2u8 } else { 0u8 };
+		bit0 | bit1
+	};
+
+	// fix high S
+	let curve_order = math::curve_order();
+	let curve_order_half = curve_order / 2.into();
+	let s_numeric: U256 = (*signature_s).into();
+	if s_numeric > curve_order_half {
+		let signature_s_hash: H256 = (curve_order - s_numeric).into();
+		signature_s = signature_s_hash.into();
+		signature_v ^= 1;
+	}
+
+	// serialize as [r][s]v
+	let mut signature = [0u8; 65];
+	signature[..32].copy_from_slice(&**signature_r);
+	signature[32..64].copy_from_slice(&**signature_s);
+	signature[64] = signature_v;
+
+	signature.into()
+}
+
+/// 
+pub fn compute_ecdsa_inversed_secret_coeff_share(secret_share: &Secret, nonce_share: &Secret, zero_share: &Secret) -> Result<Secret, Error> {
+	let mut coeff = secret_share.clone();
+	coeff.mul(nonce_share).unwrap();
+	coeff.add(zero_share).unwrap();
+	Ok(coeff)
+}
+
+/// Compute coefficient for calculation of inversed secret.
+pub fn compute_inversed_secret_coeff_from_shares(t: usize, id_numbers: &[Secret], shares: &[Secret]) -> Result<Secret, Error> {
+	debug_assert_eq!(shares.len(), 2 * t + 1);
+	debug_assert_eq!(shares.len(), id_numbers.len());
+
+	let u_shares = (0..2*t+1).map(|i| compute_shadow_mul(&shares[i], &id_numbers[i], id_numbers.iter().enumerate()
+		.filter(|&(j, _)| i != j)
+		.map(|(_, id)| id)
+		.take(2 * t))).collect::<Result<Vec<_>, _>>()?;
+
+	compute_secret_sum(u_shares.iter())
+}
+
+/// TODO
+//pub fn compute_ecdsa_inversed_nonce_share()
 
 #[cfg(test)]
 pub mod tests {
@@ -602,11 +712,9 @@ pub mod tests {
 		}).collect();
 
 		// players can interpolate the polynomial of degree 2t and compute u:
-		let u_shares: Vec<_> = (0..2*t+1).map(|i| compute_shadow_mul(&ui[i], &artifacts.id_numbers[i], artifacts.id_numbers.iter().enumerate()
-			.filter(|&(j, _)| i != j)
-			.map(|(_, id)| id)
-			.take(2 * t)).unwrap()).collect();
-		let u = compute_secret_sum(u_shares.iter()).unwrap();
+		let u = compute_inversed_secret_coeff_from_shares(t,
+			&artifacts.id_numbers.iter().take(2*t + 1).cloned().collect::<Vec<_>>(),
+			&ui.iter().take(2*t + 1).cloned().collect::<Vec<_>>()).unwrap();
 
 		// all the players can compute 1/u
 		let mut u_inv = u.clone();
@@ -665,39 +773,6 @@ pub mod tests {
 		(document_secret_decrypted, document_secret_decrypted_test)
 	}
 
-	fn serialize_ecdsa_signature(nonce_public: Public, signature_r: Secret, mut signature_s: Secret) -> Signature {
-		// compute recvery param
-		let mut signature_v = {
-			let nonce_public_x = &nonce_public[0..32];
-			let nonce_public_x: U256 = nonce_public_x.into();
-			let nonce_public_x: H256 = nonce_public_x.into();
-			let nonce_public_y = &nonce_public[32..64];
-			let nonce_public_y: U256 = nonce_public_y.into();
-			let nonce_public_y_is_odd = !(nonce_public_y % 2.into()).is_zero();
-			let bit0 = if nonce_public_y_is_odd { 1u8 } else { 0u8 };
-			let bit1 = if nonce_public_x != *signature_r { 2u8 } else { 0u8 };
-			bit0 | bit1
-		};
-
-		// fix high S
-		let curve_order = math::curve_order();
-		let curve_order_half = curve_order / 2.into();
-		let s_numeric: U256 = (*signature_s).into();
-		if s_numeric > curve_order_half {
-			let signature_s_hash: H256 = (curve_order - s_numeric).into();
-			signature_s = signature_s_hash.into();
-			signature_v ^= 1;
-		}
-
-		// serialize as [r][s]v
-		let mut signature = [0u8; 65];
-		signature[..32].copy_from_slice(&**signature_r);
-		signature[32..64].copy_from_slice(&**signature_s);
-		signature[64] = signature_v;
-
-		signature.into()
-	}
-
 	#[test]
 	fn full_encryption_math_session() {
 		let test_cases = [(0, 2), (1, 2), (1, 3), (2, 3), (1, 4), (2, 4), (3, 4), (1, 5), (2, 5), (3, 5), (4, 5),
@@ -730,12 +805,12 @@ pub mod tests {
 		let key_pair = Random.generate().unwrap();
 		let message_hash = "0000000000000000000000000000000000000000000000000000000000000042".parse().unwrap();
 		let nonce = generate_random_scalar().unwrap();
-		let signature = local_compute_signature(&nonce, key_pair.secret(), &message_hash).unwrap();
-		assert_eq!(verify_signature(key_pair.public(), &signature, &message_hash), Ok(true));
+		let signature = local_compute_schnorr_signature(&nonce, key_pair.secret(), &message_hash).unwrap();
+		assert_eq!(verify_schnorr_signature(key_pair.public(), &signature, &message_hash), Ok(true));
 	}
 
 	#[test]
-	fn full_signature_math_session() {
+	fn full_schnorr_signature_math_session() {
 		let test_cases = [(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (1, 4), (2, 4), (3, 4), (1, 5), (2, 5), (3, 5), (4, 5),
 			(1, 10), (2, 10), (3, 10), (4, 10), (5, 10), (6, 10), (7, 10), (8, 10), (9, 10)];
 		for &(t, n) in &test_cases {
@@ -762,7 +837,7 @@ pub mod tests {
 
 			// step 3: compute signature shares
 			let partial_signatures: Vec<_> = (0..n)
-				.map(|i| compute_signature_share(
+				.map(|i| compute_schnorr_signature_share(
 					t,
 					&combined_hash,
 					&one_time_artifacts.polynoms1[i][0],
@@ -782,7 +857,7 @@ pub mod tests {
 					.filter(|j| i != *j)
 					.map(|j| {
 						let signature_share = partial_signatures[j].clone();
-						assert!(_check_signature_share(&combined_hash,
+						assert!(_check_schnorr_signature_share(&combined_hash,
 							&signature_share,
 							&artifacts.public_shares[j],
 							&one_time_artifacts.public_shares[j],
@@ -794,18 +869,79 @@ pub mod tests {
 
 			// step 5: compute signature
 			let signatures: Vec<_> = (0..n)
-				.map(|i| (combined_hash.clone(), compute_signature(received_signatures[i].iter().chain(once(&partial_signatures[i]))).unwrap()))
+				.map(|i| (combined_hash.clone(), compute_schnorr_signature(received_signatures[i].iter().chain(once(&partial_signatures[i]))).unwrap()))
 				.collect();
 
 			// === verify signature ===
 			let master_secret = compute_joint_secret(artifacts.polynoms1.iter().map(|p| &p[0])).unwrap();
 			let nonce = compute_joint_secret(one_time_artifacts.polynoms1.iter().map(|p| &p[0])).unwrap();
-			let local_signature = local_compute_signature(&nonce, &master_secret, &message_hash).unwrap();
+			let local_signature = local_compute_schnorr_signature(&nonce, &master_secret, &message_hash).unwrap();
 			for signature in &signatures {
 				assert_eq!(signature, &local_signature);
-				assert_eq!(verify_signature(&artifacts.joint_public, signature, &message_hash), Ok(true));
+				assert_eq!(verify_schnorr_signature(&artifacts.joint_public, signature, &message_hash), Ok(true));
 			}
 		}
+	}
+
+	#[test]
+	fn full_ecdsa_signature_math_session() {
+		// TODO: different schemes!!!
+		// TODO: case when message hash is > curve_order!!!
+		let (t, n) = (2, 5);
+
+		// values that can be hardcoded
+		let joint_secret: Secret = Random.generate().unwrap().secret().clone();
+		let joint_nonce: Secret = Random.generate().unwrap().secret().clone();
+		let message_hash = Random.generate().unwrap().secret().clone();
+
+		// generate secret key shares
+		let artifacts = run_key_generation(t, n, None, Some(joint_secret));
+
+		// generate nonce shares
+		let nonce_artifacts = run_key_generation(t, n, Some(artifacts.id_numbers.clone()), Some(joint_nonce));
+
+		// compute public nonce shares
+		let nonce_public_shadows: Vec<_> = (0..n).map(|i| compute_shadow_mul(&nonce_artifacts.secret_shares[i],
+			&nonce_artifacts.id_numbers[i],
+			nonce_artifacts.id_numbers.iter().enumerate()
+				.filter(|&(j, _)| j != i)
+				.map(|(_, id)| id))
+				.unwrap()).collect();
+		let nonce_public_shares: Vec<_> = nonce_public_shadows.iter()
+			.map(|shadow| compute_public_share(shadow).unwrap())
+			.collect();
+
+		// compute public nonce on every node
+		// x coordinate (mapped to EC field) of this public is the r-portion of signature
+		let nonce_public = compute_public_sum(nonce_public_shares.iter()).unwrap();
+		let signature_r = compute_ecdsa_r(&nonce_public).unwrap();
+
+		// compute shares of 1/nonce so that both nonce && 1/nonce are still unknown to all nodes
+		let nonce_inv_shares = run_reciprocal_protocol(t, &nonce_artifacts);
+
+		// compute multiplication of secret-shares * inv-nonce-shares
+		let mul_shares = run_multiplication_protocol(t, &artifacts.secret_shares, &nonce_inv_shares);
+
+		// compute shares for s portion of signature: nonce_inv * (message_hash + secret * signature_r)
+		// every node broadcasts this share
+		let message_hash: Secret = message_hash.into();
+		let signature_s_shares: Vec<_> = (0..n).map(|i| {
+			compute_ecdsa_s_share(
+				&nonce_inv_shares[i],
+				&mul_shares[i],
+				&signature_r,
+				&message_hash).unwrap()
+		}).collect();
+
+		// compute signature_s from received shares
+		let signature_s = compute_ecdsa_s(t, &signature_s_shares, &artifacts.id_numbers).unwrap();
+
+		// check signature
+		let signature_actual = serialize_ecdsa_signature(&nonce_public, signature_r, signature_s);
+		let joint_secret = compute_joint_secret(artifacts.polynoms1.iter().map(|p| &p[0])).unwrap();
+		let joint_secret_pair = KeyPair::from_secret(joint_secret).unwrap();
+		assert_eq!(recover(&signature_actual, &message_hash).unwrap(), *joint_secret_pair.public());
+		assert!(verify_public(joint_secret_pair.public(), &signature_actual, &message_hash).unwrap());
 	}
 
 	#[test]
@@ -952,73 +1088,52 @@ pub mod tests {
 	}
 
 	#[test]
-	fn full_ecdsa_generation_session() {
-		let (t, n) = (2, 5);
+	fn my_test() {
+		/*let nonce_shares = vec![
+			"cfe6a8c05848b0dd931b3fb08ea1d1de64cf3dbeda42bf3944ee42ec82506b25".parse().unwrap(),
+			"c4bd58b2f4589b7ef685592c44e55257782032aed3bba66e0173cab778702c5e".parse().unwrap(),
+			"0e394007b322a6bab7006551bfa5f99bea783749e852cff44b701cf6637d27f4".parse().unwrap(),
+			"703fa05efafc61dd2a9378afa08d98864eb1cb8084ef16764ba4e89480d80686".parse().unwrap(),
+			"339434da07db1079f4f730ba79cf972f0b4c7dd3edb32ffcb40bc813035bb656".parse().unwrap()
+		];
+		let nonce = compute_secret_sum(nonce_shares.iter()).unwrap();
+		let mut inv_nonce_expected = nonce;
+		inv_nonce_expected.inv().unwrap();
 
-		// values that can be hardcoded
-		let joint_secret: Secret = Random.generate().unwrap().secret().clone();
-		let joint_nonce: Secret = Random.generate().unwrap().secret().clone();
-		let message_hash = Random.generate().unwrap().secret().clone();
+		let inv_nonce_shares = vec![
+			"143f9bb227cb826595295e87c69793ac6b46ab5c48b6f13820459bd1961e8436".parse().unwrap(),
+			"6ae4daa7bb16154fef08cba38251935b76f9f7c2b9c627a8ce849245bce784cc".parse().unwrap(),
+			"141f80f0e26861676b622959a52fd853baa5251526f22527b9b36c6b422a2023".parse().unwrap(),
+			"39ebe7afc6dffced32b9a9744dc4913ceed0d485b57e2d577516504e67da8dbb".parse().unwrap(),
+			"a14e441f6cd71ace97b51bd2637874b28bff9a63a0a6f4f7bb5dab8bde3abcb5".parse().unwrap()
+		];
+		let inv_nonce_actual = compute_secret_sum(inv_nonce_shares.iter()).unwrap();
 
-		// generate secret key shares
-		let artifacts = run_key_generation(t, n, None, Some(joint_secret));
-
-		// generate nonce shares
-		let nonce_artifacts = run_key_generation(t, n, Some(artifacts.id_numbers.clone()), Some(joint_nonce));
-
-		// compute public nonce shares
-		let nonce_public_shadows: Vec<_> = (0..n).map(|i| compute_shadow_mul(&nonce_artifacts.secret_shares[i],
-			&nonce_artifacts.id_numbers[i],
-			nonce_artifacts.id_numbers.iter().enumerate()
-				.filter(|&(j, _)| j != i)
-				.map(|(_, id)| id))
-				.unwrap()).collect();
-		let nonce_public_shares: Vec<_> = nonce_public_shadows.iter()
-			.map(|shadow| compute_public_share(shadow).unwrap())
-			.collect();
-
-		// compute public nonce on every node
-		// x coordinate (mapped to EC field) of this public is the r-portion of signature
-		let nonce_public = compute_public_sum(nonce_public_shares.iter()).unwrap();
-		let signature_r = &nonce_public[0..32];
-		let signature_r: U256 = signature_r.into();
-		let signature_r: H256 = (signature_r % math::curve_order()).into();
-		let signature_r = Secret::from_slice(&*signature_r);
-		signature_r.check_validity().unwrap();
-
-		// compute shares of 1/nonce so that both nonce && 1/nonce are still unknown to all nodes
-		let nonce_inv_shares = run_reciprocal_protocol(t, &nonce_artifacts);
-
-		// compute multiplication of secret-shares * inv-nonce-shares
-		let mul_shares = run_multiplication_protocol(t, &artifacts.secret_shares, &nonce_inv_shares);
-
-		// compute shares for s portion of signature: nonce_inv * (message_hash + secret * signature_r)
-		// every node broadcasts this share
-		let message_hash: Secret = message_hash.into();
-		let signature_s_shares: Vec<_> = (0..n).map(|i| {
-			let mut nonce_inv_share_mul_message_hash = nonce_inv_shares[i].clone();
-			nonce_inv_share_mul_message_hash.mul(&message_hash).unwrap();
-
-			let mut nonce_inv_share_mul_secret_share_mul_r = mul_shares[i].clone();
-			nonce_inv_share_mul_secret_share_mul_r.mul(&signature_r).unwrap();
-
-			let mut signature_s_share = nonce_inv_share_mul_message_hash;
-			signature_s_share.add(&nonce_inv_share_mul_secret_share_mul_r).unwrap();
-
-			signature_s_share
-		}).collect();
-
-		// compute signature_s from received shares
-		let double_t = t * 2;
-		let signature_s = compute_joint_secret_from_shares(double_t,
-			&signature_s_shares.iter().take(double_t + 1).collect::<Vec<_>>(),
-			&artifacts.id_numbers.iter().take(double_t + 1).collect::<Vec<_>>()).unwrap();
-
-		// check signature
-		let signature_actual = serialize_ecdsa_signature(nonce_public, signature_r, signature_s);
-		let joint_secret = compute_joint_secret(artifacts.polynoms1.iter().map(|p| &p[0])).unwrap();
-		let joint_secret_pair = KeyPair::from_secret(joint_secret).unwrap();
-		assert_eq!(recover(&signature_actual, &message_hash).unwrap(), *joint_secret_pair.public());
-		assert!(verify_public(joint_secret_pair.public(), &signature_actual, &message_hash).unwrap());
+		assert_eq!(inv_nonce_expected, inv_nonce_actual);*/
+/*
+=== d: nonce_share=
+=== d: inv_nonce_share=
+=== d: inv_zero_share=071d9627b80e55a8285b29e7e781c73a3ee71952d7d7a1b48049648ff6e4efc3
+=== d -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
+=== a: nonce_share=
+=== a: inv_nonce_share=
+=== a: inv_zero_share=0e506badd592f638322ff4eb9da2ac1964b647012ef6b586074e32e2825d0e56
+=== a -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
+=== d -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
+=== b: nonce_share=
+=== b: inv_nonce_share=
+=== b: inv_zero_share=0f50bfdcc207985dc29f2907de543b5e25917ba40b5834e9fbcbe85f8b8f4644
+=== b -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
+=== d -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
+=== c: nonce_share=
+=== c: inv_nonce_share=
+=== c: inv_zero_share=c040a5f3575d5987d6f8541255d26f66cb77f8a4f445cebfe4a947463154cc39
+=== c -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
+=== d -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
+=== d -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
+=== d -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
+=== M: nonce_share=
+=== M: inv_nonce_share=
+=== M: inv_zero_share=2b3626b9588b1cce0d8a8e1ca41114e36996bdba441dd368cf82bd83f4fc7163*/
 	}
 }

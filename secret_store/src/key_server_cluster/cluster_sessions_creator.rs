@@ -23,7 +23,7 @@ use key_server_cluster::{Error, NodeId, SessionId, AclStorage, KeyStorage, Docum
 use key_server_cluster::cluster::{Cluster, ClusterConfiguration};
 use key_server_cluster::connection_trigger::ServersSetChangeSessionCreatorConnector;
 use key_server_cluster::cluster_sessions::{ClusterSession, SessionIdWithSubSession, AdminSession, AdminSessionCreationData};
-use key_server_cluster::message::{self, Message, DecryptionMessage, SigningMessage, ConsensusMessageOfShareAdd,
+use key_server_cluster::message::{self, Message, DecryptionMessage, SchnorrSigningMessage, ConsensusMessageOfShareAdd,
 	ShareAddMessage, ServersSetChangeMessage, ConsensusMessage, ConsensusMessageWithServersSet};
 use key_server_cluster::generation_session::{SessionImpl as GenerationSessionImpl, SessionParams as GenerationSessionParams};
 use key_server_cluster::decryption_session::{SessionImpl as DecryptionSessionImpl,
@@ -249,17 +249,17 @@ pub struct SchnorrSigningSessionCreator {
 impl ClusterSessionCreator<SchnorrSigningSessionImpl, Signature> for SchnorrSigningSessionCreator {
 	fn creation_data_from_message(message: &Message) -> Result<Option<Signature>, Error> {
 		match *message {
-			Message::Signing(SigningMessage::SigningConsensusMessage(ref message)) => match &message.message {
+			Message::SchnorrSigning(SchnorrSigningMessage::SchnorrSigningConsensusMessage(ref message)) => match &message.message {
 				&ConsensusMessage::InitializeConsensusSession(ref message) => Ok(Some(message.requestor_signature.clone().into())),
 				_ => Err(Error::InvalidMessage),
 			},
-			Message::Signing(SigningMessage::SigningSessionDelegation(ref message)) => Ok(Some(message.requestor_signature.clone().into())),
+			Message::SchnorrSigning(SchnorrSigningMessage::SchnorrSigningSessionDelegation(ref message)) => Ok(Some(message.requestor_signature.clone().into())),
 			_ => Err(Error::InvalidMessage),
 		}
 	}
 
 	fn make_error_message(sid: SessionIdWithSubSession, nonce: u64, err: Error) -> Message {
-		message::Message::Signing(message::SigningMessage::SigningSessionError(message::SigningSessionError {
+		message::Message::SchnorrSigning(message::SchnorrSigningMessage::SchnorrSigningSessionError(message::SchnorrSigningSessionError {
 			session: sid.id.into(),
 			sub_session: sid.access_key.into(),
 			session_nonce: nonce,
@@ -407,7 +407,8 @@ impl IntoSessionId<SessionId> for Message {
 			Message::Generation(ref message) => Ok(message.session_id().clone()),
 			Message::Encryption(ref message) => Ok(message.session_id().clone()),
 			Message::Decryption(_) => Err(Error::InvalidMessage),
-			Message::Signing(_) => Err(Error::InvalidMessage),
+			Message::SchnorrSigning(_) => Err(Error::InvalidMessage),
+			Message::EcdsaSigning(_) => Err(Error::InvalidMessage),
 			Message::ServersSetChange(ref message) => Ok(message.session_id().clone()),
 			Message::ShareAdd(ref message) => Ok(message.session_id().clone()),
 			Message::KeyVersionNegotiation(_) => Err(Error::InvalidMessage),
@@ -422,7 +423,8 @@ impl IntoSessionId<SessionIdWithSubSession> for Message {
 			Message::Generation(_) => Err(Error::InvalidMessage),
 			Message::Encryption(_) => Err(Error::InvalidMessage),
 			Message::Decryption(ref message) => Ok(SessionIdWithSubSession::new(message.session_id().clone(), message.sub_session_id().clone())),
-			Message::Signing(ref message) => Ok(SessionIdWithSubSession::new(message.session_id().clone(), message.sub_session_id().clone())),
+			Message::SchnorrSigning(ref message) => Ok(SessionIdWithSubSession::new(message.session_id().clone(), message.sub_session_id().clone())),
+			Message::EcdsaSigning(ref message) => Ok(SessionIdWithSubSession::new(message.session_id().clone(), message.sub_session_id().clone())),
 			Message::ServersSetChange(_) => Err(Error::InvalidMessage),
 			Message::ShareAdd(_) => Err(Error::InvalidMessage),
 			Message::KeyVersionNegotiation(ref message) => Ok(SessionIdWithSubSession::new(message.session_id().clone(), message.sub_session_id().clone())),
