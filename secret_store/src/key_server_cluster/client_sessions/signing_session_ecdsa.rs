@@ -733,7 +733,7 @@ impl SessionImpl {
 				return Ok(());
 			}
 
-			let inversed_nonce_coeff = math::compute_inversed_secret_coeff_from_shares(key_share.threshold,
+			let inversed_nonce_coeff = math::compute_ecdsa_inversed_secret_coeff_from_shares(key_share.threshold,
 				&inversed_nonce_coeff_shares.keys().map(|n| key_version.id_numbers[n].clone()).collect::<Vec<_>>(),
 				&inversed_nonce_coeff_shares.values().cloned().collect::<Vec<_>>())?;
 

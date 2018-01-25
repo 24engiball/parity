@@ -498,7 +498,7 @@ pub fn serialize_ecdsa_signature(nonce_public: &Public, signature_r: Secret, mut
 	signature.into()
 }
 
-/// 
+/// Compute share of ECDSA reversed-nonce coefficient. Result of this_coeff * secret_share gives us a share of inv(nonce).
 pub fn compute_ecdsa_inversed_secret_coeff_share(secret_share: &Secret, nonce_share: &Secret, zero_share: &Secret) -> Result<Secret, Error> {
 	let mut coeff = secret_share.clone();
 	coeff.mul(nonce_share).unwrap();
@@ -506,8 +506,8 @@ pub fn compute_ecdsa_inversed_secret_coeff_share(secret_share: &Secret, nonce_sh
 	Ok(coeff)
 }
 
-/// Compute coefficient for calculation of inversed secret.
-pub fn compute_inversed_secret_coeff_from_shares(t: usize, id_numbers: &[Secret], shares: &[Secret]) -> Result<Secret, Error> {
+/// Compute ECDSA reversed-nonce coefficient from its shares. Result of this_coeff * secret_share gives us a share of inv(nonce).
+pub fn compute_ecdsa_inversed_secret_coeff_from_shares(t: usize, id_numbers: &[Secret], shares: &[Secret]) -> Result<Secret, Error> {
 	debug_assert_eq!(shares.len(), 2 * t + 1);
 	debug_assert_eq!(shares.len(), id_numbers.len());
 
@@ -706,7 +706,7 @@ pub mod tests {
 			&z_artifacts.secret_shares[i]).unwrap()).collect();
 
 		// players can interpolate the polynomial of degree 2t and compute u && inv(u):
-		let u_inv = compute_inversed_secret_coeff_from_shares(t,
+		let u_inv = compute_ecdsa_inversed_secret_coeff_from_shares(t,
 			&artifacts.id_numbers.iter().take(2*t + 1).cloned().collect::<Vec<_>>(),
 			&ui.iter().take(2*t + 1).cloned().collect::<Vec<_>>()).unwrap();
 
