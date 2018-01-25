@@ -522,7 +522,13 @@ pub fn compute_inversed_secret_coeff_from_shares(t: usize, id_numbers: &[Secret]
 		.map(|(_, id)| id)
 		.take(2 * t))).collect::<Result<Vec<_>, _>>()?;
 
-	compute_secret_sum(u_shares.iter())
+	// compute u
+	let u = compute_secret_sum(u_shares.iter())?;
+
+	// compute inv(u)
+	let mut u_inv = u;
+	u_inv.inv()?;
+	Ok(u_inv)
 }
 
 /// TODO
@@ -704,21 +710,14 @@ pub mod tests {
 		let z_artifacts = run_zero_key_generation(2 * t, n, &artifacts.id_numbers);
 
 		// each player computes && broadcast u[i] = x[i] * e[i] + z[i]
-		let ui: Vec<_> = (0..n).map(|i| {
-			let mut x_mul_e = artifacts.secret_shares[i].clone();
-			x_mul_e.mul(&e_artifacts.secret_shares[i]).unwrap();
-			x_mul_e.add(&z_artifacts.secret_shares[i]).unwrap();
-			x_mul_e
-		}).collect();
+		let ui: Vec<_> = (0..n).map(|i| compute_ecdsa_inversed_secret_coeff_share(&artifacts.secret_shares[i],
+			&e_artifacts.secret_shares[i],
+			&z_artifacts.secret_shares[i]).unwrap()).collect();
 
-		// players can interpolate the polynomial of degree 2t and compute u:
-		let u = compute_inversed_secret_coeff_from_shares(t,
+		// players can interpolate the polynomial of degree 2t and compute u && inv(u):
+		let u_inv = compute_inversed_secret_coeff_from_shares(t,
 			&artifacts.id_numbers.iter().take(2*t + 1).cloned().collect::<Vec<_>>(),
 			&ui.iter().take(2*t + 1).cloned().collect::<Vec<_>>()).unwrap();
-
-		// all the players can compute 1/u
-		let mut u_inv = u.clone();
-		u_inv.inv().unwrap();
 
 		// each player Pi computes his share of 1/x as e[i] * 1/u
 		let x_inv_shares: Vec<_> = (0..n).map(|i| {
@@ -1085,55 +1084,5 @@ pub mod tests {
 
 			assert_eq!(actual_joint_secret_inv, expected_joint_secret_inv);
 		}
-	}
-
-	#[test]
-	fn my_test() {
-		/*let nonce_shares = vec![
-			"cfe6a8c05848b0dd931b3fb08ea1d1de64cf3dbeda42bf3944ee42ec82506b25".parse().unwrap(),
-			"c4bd58b2f4589b7ef685592c44e55257782032aed3bba66e0173cab778702c5e".parse().unwrap(),
-			"0e394007b322a6bab7006551bfa5f99bea783749e852cff44b701cf6637d27f4".parse().unwrap(),
-			"703fa05efafc61dd2a9378afa08d98864eb1cb8084ef16764ba4e89480d80686".parse().unwrap(),
-			"339434da07db1079f4f730ba79cf972f0b4c7dd3edb32ffcb40bc813035bb656".parse().unwrap()
-		];
-		let nonce = compute_secret_sum(nonce_shares.iter()).unwrap();
-		let mut inv_nonce_expected = nonce;
-		inv_nonce_expected.inv().unwrap();
-
-		let inv_nonce_shares = vec![
-			"143f9bb227cb826595295e87c69793ac6b46ab5c48b6f13820459bd1961e8436".parse().unwrap(),
-			"6ae4daa7bb16154fef08cba38251935b76f9f7c2b9c627a8ce849245bce784cc".parse().unwrap(),
-			"141f80f0e26861676b622959a52fd853baa5251526f22527b9b36c6b422a2023".parse().unwrap(),
-			"39ebe7afc6dffced32b9a9744dc4913ceed0d485b57e2d577516504e67da8dbb".parse().unwrap(),
-			"a14e441f6cd71ace97b51bd2637874b28bff9a63a0a6f4f7bb5dab8bde3abcb5".parse().unwrap()
-		];
-		let inv_nonce_actual = compute_secret_sum(inv_nonce_shares.iter()).unwrap();
-
-		assert_eq!(inv_nonce_expected, inv_nonce_actual);*/
-/*
-=== d: nonce_share=
-=== d: inv_nonce_share=
-=== d: inv_zero_share=071d9627b80e55a8285b29e7e781c73a3ee71952d7d7a1b48049648ff6e4efc3
-=== d -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== a: nonce_share=
-=== a: inv_nonce_share=
-=== a: inv_zero_share=0e506badd592f638322ff4eb9da2ac1964b647012ef6b586074e32e2825d0e56
-=== a -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== b: nonce_share=
-=== b: inv_nonce_share=
-=== b: inv_zero_share=0f50bfdcc207985dc29f2907de543b5e25917ba40b5834e9fbcbe85f8b8f4644
-=== b -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== c: nonce_share=
-=== c: inv_nonce_share=
-=== c: inv_zero_share=c040a5f3575d5987d6f8541255d26f66cb77f8a4f445cebfe4a947463154cc39
-=== c -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== M: nonce_share=
-=== M: inv_nonce_share=
-=== M: inv_zero_share=2b3626b9588b1cce0d8a8e1ca41114e36996bdba441dd368cf82bd83f4fc7163*/
 	}
 }

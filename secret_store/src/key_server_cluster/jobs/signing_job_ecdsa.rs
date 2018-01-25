@@ -88,7 +88,7 @@ impl JobExecutor for EcdsaSigningJob {
 	type PartialJobResponse = EcdsaPartialSigningResponse;
 	type JobResponse = Signature;
 
-	fn prepare_partial_request(&self, node: &NodeId, nodes: &BTreeSet<NodeId>) -> Result<EcdsaPartialSigningRequest, Error> {
+	fn prepare_partial_request(&self, _node: &NodeId, nodes: &BTreeSet<NodeId>) -> Result<EcdsaPartialSigningRequest, Error> {
 		debug_assert!(nodes.len() == self.key_share.threshold * 2 + 1);
 
 		let request_id = self.request_id.as_ref()
@@ -105,16 +105,16 @@ impl JobExecutor for EcdsaSigningJob {
 	}
 
 	fn process_partial_request(&mut self, partial_request: EcdsaPartialSigningRequest) -> Result<JobPartialRequestAction<EcdsaPartialSigningResponse>, Error> {
+		let inversed_nonce_coeff_mul_nonce = math::compute_secret_mul(&partial_request.inversed_nonce_coeff, &self.inv_nonce_share)?;
 		let key_version = self.key_share.version(&self.key_version).map_err(|e| Error::KeyStorage(e.into()))?;
 		let signature_r = math::compute_ecdsa_r(&self.nonce_public)?;
-		let inv_nonce_mul_secret = math::compute_secret_mul(&self.inv_nonce_share, &key_version.secret_share)?;
+		let inv_nonce_mul_secret = math::compute_secret_mul(&inversed_nonce_coeff_mul_nonce, &key_version.secret_share)?;
 		let partial_signature_s = math::compute_ecdsa_s_share(
-			&self.inv_nonce_share,
+			&inversed_nonce_coeff_mul_nonce,
 			&inv_nonce_mul_secret,
 			&signature_r,
 			&partial_request.message_hash,
 		)?;
-println!("=== partial_signature_s(nonce_public={:?}, inv_nonce_share={:?}, secret_share={:?}) = {:?}", self.nonce_public, *self.inv_nonce_share, *key_version.secret_share, partial_signature_s);
 
 		Ok(JobPartialRequestAction::Respond(EcdsaPartialSigningResponse {
 			request_id: partial_request.id,
@@ -137,8 +137,8 @@ println!("=== partial_signature_s(nonce_public={:?}, inv_nonce_share={:?}, secre
 			return Err(Error::InvalidMessage);
 		}
 
-		let message_hash = self.message_hash.as_ref()
-			.expect("compute_response is only called on master nodes; message_hash is filed in constructor on master nodes; qed");
+		/*let message_hash = self.message_hash.as_ref()
+			.expect("compute_response is only called on master nodes; message_hash is filed in constructor on master nodes; qed");*/
 
 		let id_numbers: Vec<_> = partial_responses.keys().map(|n| key_version.id_numbers[n].clone()).collect();
 		let signature_s_shares: Vec<_> = partial_responses.values().map(|r| r.partial_signature_s.clone()).collect();

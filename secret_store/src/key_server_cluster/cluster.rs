@@ -887,7 +887,7 @@ impl ClusterClient for ClusterClientImpl {
 
 		let cluster = create_cluster_view(&self.data, true)?;
 		let session = self.data.sessions.generation_sessions.insert(cluster, self.data.self_key_pair.public().clone(), session_id, None, false, None)?;
-		match session.initialize(author, false, threshold, connected_nodes) {
+		match session.initialize(author, false, threshold, connected_nodes.into()) {
 			Ok(()) => Ok(session),
 			Err(error) => {
 				self.data.sessions.generation_sessions.remove(&session.id());

@@ -173,6 +173,32 @@ pub enum SessionState {
 	Failed,
 }
 
+pub enum InitializationNodes {
+	RandomNumbers(BTreeSet<NodeId>),
+	SpecificNumbers(BTreeMap<NodeId, Secret>)
+}
+
+impl InitializationNodes {
+	pub fn set(&self) -> BTreeSet<NodeId> {
+		match *self {
+			InitializationNodes::RandomNumbers(ref nodes) => nodes.clone(),
+			InitializationNodes::SpecificNumbers(ref nodes) => nodes.keys().cloned().collect(),
+		}
+	}
+}
+
+impl From<BTreeSet<NodeId>> for InitializationNodes {
+	fn from(nodes: BTreeSet<NodeId>) -> Self {
+		InitializationNodes::RandomNumbers(nodes)
+	}
+}
+
+impl From<BTreeMap<NodeId, Secret>> for InitializationNodes {
+	fn from(nodes: BTreeMap<NodeId, Secret>) -> Self {
+		InitializationNodes::SpecificNumbers(nodes)
+	}
+}
+
 impl SessionImpl {
 	/// Create new generation session.
 	pub fn new(params: SessionParams) -> Self {
@@ -236,9 +262,9 @@ impl SessionImpl {
 	}
 
 	/// Start new session initialization. This must be called on master node.
-	pub fn initialize(&self, author: Public, is_zero: bool, threshold: usize, nodes: BTreeSet<NodeId>) -> Result<(), Error> {
-		check_cluster_nodes(self.node(), &nodes)?;
-		check_threshold(threshold, &nodes)?;
+	pub fn initialize(&self, author: Public, is_zero: bool, threshold: usize, nodes: InitializationNodes) -> Result<(), Error> {
+		check_cluster_nodes(self.node(), &nodes.set())?;
+		check_threshold(threshold, &nodes.set())?;
 
 		let mut data = self.data.lock();
 
@@ -252,10 +278,19 @@ impl SessionImpl {
 		data.author = Some(author.clone());
 		data.is_zero = Some(is_zero);
 		data.threshold = Some(threshold);
-		for node_id in &nodes {
-			// generate node identification parameter
-			let node_id_number = math::generate_random_scalar()?;
-			data.nodes.insert(node_id.clone(), NodeData::with_id_number(node_id_number));
+		match nodes {
+			InitializationNodes::RandomNumbers(nodes) => {
+				for node_id in nodes {
+					// generate node identification parameter
+					let node_id_number = math::generate_random_scalar()?;
+					data.nodes.insert(node_id, NodeData::with_id_number(node_id_number));
+				}
+			},
+			InitializationNodes::SpecificNumbers(nodes) => {
+				for (node_id, node_id_number) in nodes {
+					data.nodes.insert(node_id, NodeData::with_id_number(node_id_number));
+				}
+			},
 		}
 
 		let mut visit_policy = EveryOtherNodeVisitor::new(self.node(), data.nodes.keys().cloned());
@@ -1028,7 +1063,7 @@ pub mod tests {
 
 	fn make_simple_cluster(threshold: usize, num_nodes: usize) -> Result<(SessionId, NodeId, NodeId, MessageLoop), Error> {
 		let l = MessageLoop::new(num_nodes);
-		l.master().initialize(Public::default(), false, threshold, l.nodes.keys().cloned().collect())?;
+		l.master().initialize(Public::default(), false, threshold, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into())?;
 
 		let session_id = l.session_id.clone();
 		let master_id = l.master().node().clone();
@@ -1039,7 +1074,7 @@ pub mod tests {
 	#[test]
 	fn initializes_in_cluster_of_single_node() {
 		let l = MessageLoop::new(1);
-		assert!(l.master().initialize(Public::default(), false, 0, l.nodes.keys().cloned().collect()).is_ok());
+		assert!(l.master().initialize(Public::default(), false, 0, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).is_ok());
 	}
 
 	#[test]
@@ -1054,7 +1089,7 @@ pub mod tests {
 			nonce: Some(0),
 		});
 		let cluster_nodes: BTreeSet<_> = (0..2).map(|_| math::generate_random_point().unwrap()).collect();
-		assert_eq!(session.initialize(Public::default(), false, 0, cluster_nodes).unwrap_err(), Error::InvalidNodesConfiguration);
+		assert_eq!(session.initialize(Public::default(), false, 0, cluster_nodes.into()).unwrap_err(), Error::InvalidNodesConfiguration);
 	}
 
 	#[test]
@@ -1068,7 +1103,8 @@ pub mod tests {
 	#[test]
 	fn fails_to_initialize_when_already_initialized() {
 		let (_, _, _, l) = make_simple_cluster(0, 2).unwrap();
-		assert_eq!(l.master().initialize(Public::default(), false, 0, l.nodes.keys().cloned().collect()).unwrap_err(), Error::InvalidStateForRequest);
+		assert_eq!(l.master().initialize(Public::default(), false, 0, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).unwrap_err(),
+			Error::InvalidStateForRequest);
 	}
 
 	#[test]
@@ -1307,7 +1343,7 @@ pub mod tests {
 		let test_cases = [(0, 5), (2, 5), (3, 5)];
 		for &(threshold, num_nodes) in &test_cases {
 			let mut l = MessageLoop::new(num_nodes);
-			l.master().initialize(Public::default(), false, threshold, l.nodes.keys().cloned().collect()).unwrap();
+			l.master().initialize(Public::default(), false, threshold, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).unwrap();
 			assert_eq!(l.nodes.len(), num_nodes);
 
 			// let nodes do initialization + keys dissemination

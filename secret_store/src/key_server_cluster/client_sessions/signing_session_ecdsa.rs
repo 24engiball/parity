@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 // Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
@@ -400,14 +403,16 @@ impl SessionImpl {
 			return Ok(());
 		}
 
-		let consensus_group = data.consensus_session.select_consensus_group()?.clone();
-		let mut other_consensus_group_nodes = consensus_group.clone();
-		other_consensus_group_nodes.remove(&self.core.meta.self_node_id);
-
 		let key_share = match self.core.key_share.as_ref() {
 			None => return Err(Error::InvalidMessage),
 			Some(key_share) => key_share,
 		};
+		let key_version = key_share.version(data.version.as_ref().expect("TODO")).map_err(|e| Error::KeyStorage(e.into()))?;
+
+		let consensus_group = data.consensus_session.select_consensus_group()?.clone();
+		let mut other_consensus_group_nodes = consensus_group.clone();
+		other_consensus_group_nodes.remove(&self.core.meta.self_node_id);
+		let consensus_group_map: BTreeMap<_, _> = consensus_group.iter().map(|n| (n.clone(), key_version.id_numbers[n].clone())).collect();
 
 		let nonce = self.core.nonce;
 		let access_key = self.core.access_key.clone();
@@ -429,7 +434,7 @@ impl SessionImpl {
 			}),
 			nonce: None,
 		});
-		generation_session.initialize(Public::default(), false, key_share.threshold * 2, consensus_group.clone())?;
+		generation_session.initialize(Public::default(), false, key_share.threshold, consensus_group_map.clone().into())?;
 		data.sig_nonce_generation_session = Some(generation_session);
 
 		let nonce = self.core.nonce;
@@ -452,7 +457,7 @@ impl SessionImpl {
 			}),
 			nonce: None,
 		});
-		generation_session.initialize(Public::default(), false, key_share.threshold * 2, consensus_group.clone())?;
+		generation_session.initialize(Public::default(), false, key_share.threshold, consensus_group_map.clone().into())?;
 		data.inv_nonce_generation_session = Some(generation_session);
 
 		let nonce = self.core.nonce;
@@ -475,7 +480,7 @@ impl SessionImpl {
 			}),
 			nonce: None,
 		});
-		generation_session.initialize(Public::default(), true, key_share.threshold * 2, consensus_group)?;
+		generation_session.initialize(Public::default(), true, key_share.threshold * 2, consensus_group_map.clone().into())?;
 		data.inv_zero_generation_session = Some(generation_session);
 
 		data.state = SessionState::NoncesGenerating;
@@ -705,11 +710,13 @@ impl SessionImpl {
 
 		let key_version = key_share.version(data.version.as_ref().expect("TODO")).map_err(|e| Error::KeyStorage(e.into()))?;
 
-		if sender != &self.core.meta.master_node_id {
+		if self.core.meta.self_node_id != self.core.meta.master_node_id {
 			return Err(Error::InvalidMessage);
 		}
-		if data.state != SessionState::WaitingForInversedNonceShares {
-			return Err(Error::InvalidStateForRequest);
+		match data.state {
+			SessionState::WaitingForInversedNonceShares => (),
+			SessionState::NoncesGenerating => return Err(Error::TooEarlyForRequest),
+			_ => return Err(Error::InvalidStateForRequest),
 		}
 
 		let inversed_nonce_coeff = {
@@ -899,15 +906,10 @@ impl SessionImpl {
 		let sig_nonce_generation_session = data.sig_nonce_generation_session.as_ref().expect(expect_proof);
 		let inv_nonce_generation_session = data.inv_nonce_generation_session.as_ref().expect(expect_proof);
 		let inv_zero_generation_session = data.inv_zero_generation_session.as_ref().expect(expect_proof);
-		let are_generated = sig_nonce_generation_session.state() == GenerationSessionState::Finished
+
+		sig_nonce_generation_session.state() == GenerationSessionState::Finished
 			&& inv_nonce_generation_session.state() == GenerationSessionState::Finished
-			&& inv_zero_generation_session.state() == GenerationSessionState::Finished;
-if are_generated {
-	println!("=== {:?}: nonce_share={:?}", sig_nonce_generation_session.node(), *sig_nonce_generation_session.joint_public_and_secret().unwrap().unwrap().2);
-	println!("=== {:?}: inv_nonce_share={:?}", sig_nonce_generation_session.node(), *inv_nonce_generation_session.joint_public_and_secret().unwrap().unwrap().2);
-	println!("=== {:?}: inv_zero_share={:?}", sig_nonce_generation_session.node(), *inv_zero_generation_session.joint_public_and_secret().unwrap().unwrap().2);
-}
-		are_generated
+			&& inv_zero_generation_session.state() == GenerationSessionState::Finished
 	}
 
 	/// Broadcast inversed nonce share.
@@ -918,28 +920,29 @@ if are_generated {
 		};
 		let key_version = key_share.version(data.version.as_ref().expect("TODO")).map_err(|e| Error::KeyStorage(e.into()))?;
 
+		let sig_nonce_generation_session = data.sig_nonce_generation_session.as_ref().expect("TODO");
+		let sig_nonce = sig_nonce_generation_session.joint_public_and_secret().expect("TODO").expect("TODO").2;
+
 		let inv_nonce_generation_session = data.inv_nonce_generation_session.as_ref().expect("TODO");
 		let inv_nonce = inv_nonce_generation_session.joint_public_and_secret().expect("TODO").expect("TODO").2;
 
 		let inv_zero_generation_session = data.inv_zero_generation_session.as_ref().expect("TODO");
-		let inv_zero = inv_nonce_generation_session.joint_public_and_secret().expect("TODO").expect("TODO").2;
+		let inv_zero = inv_zero_generation_session.joint_public_and_secret().expect("TODO").expect("TODO").2;
 
-		let inversed_nonce_coeff_share = math::compute_ecdsa_inversed_secret_coeff_share(&key_version.secret_share, &inv_nonce, &inv_zero)?;
-		core.cluster.send(&core.meta.master_node_id, Message::EcdsaSigning(EcdsaSigningMessage::EcdsaSigningInversedNonceCoeffShare(EcdsaSigningInversedNonceCoeffShare {
-			session: core.meta.id.clone().into(),
-			sub_session: core.access_key.clone().into(),
-			session_nonce: core.nonce,
-			inversed_nonce_coeff_share: inversed_nonce_coeff_share.into(),
-		})))
-/*		let version = data.version.as_ref().ok_or(Error::InvalidMessage)?.clone();
-		let message_hash = data.message_hash
-			.expect("we are on master node; on master node message_hash is filled in initialize(); on_generation_message follows initialize; qed");
-
-		let nonce_exists_proof = "nonce is generated before signature is computed; we are in SignatureComputing state; qed";
-		let sig_nonce_public = data.sig_nonce_generation_session.as_ref().expect(nonce_exists_proof).joint_public_and_secret().expect(nonce_exists_proof)?.0;
-		let inv_nonce_share = data.inv_nonce_generation_session.as_ref().expect(nonce_exists_proof).joint_public_and_secret().expect(nonce_exists_proof)?.2;
-
-		core.disseminate_jobs(&mut data.consensus_session, &version, sig_nonce_public, inv_nonce_share, message_hash)*/
+		let inversed_nonce_coeff_share = math::compute_ecdsa_inversed_secret_coeff_share(&sig_nonce, &inv_nonce, &inv_zero)?;
+		if core.meta.self_node_id == core.meta.master_node_id {
+			let mut inversed_nonce_coeff_shares = BTreeMap::new();
+			inversed_nonce_coeff_shares.insert(core.meta.self_node_id.clone(), inversed_nonce_coeff_share);
+			data.inversed_nonce_coeff_shares = Some(inversed_nonce_coeff_shares);
+			Ok(())
+		} else {
+			core.cluster.send(&core.meta.master_node_id, Message::EcdsaSigning(EcdsaSigningMessage::EcdsaSigningInversedNonceCoeffShare(EcdsaSigningInversedNonceCoeffShare {
+				session: core.meta.id.clone().into(),
+				sub_session: core.access_key.clone().into(),
+				session_nonce: core.nonce,
+				inversed_nonce_coeff_share: inversed_nonce_coeff_share.into(),
+			})))
+		}
 	}
 }
 
@@ -1116,7 +1119,7 @@ impl JobTransport for SigningJobTransport {
 mod tests {
 	use std::sync::Arc;
 	use std::str::FromStr;
-	use std::collections::{BTreeMap, VecDeque};
+	use std::collections::{BTreeSet, BTreeMap, VecDeque};
 	use ethereum_types::H256;
 	use ethkey::{self, Random, Generator, Public, Secret, KeyPair, verify_public};
 	use acl_storage::DummyAclStorage;
@@ -1203,7 +1206,6 @@ mod tests {
 		}
 
 		pub fn process_message(&mut self, mut msg: (NodeId, NodeId, Message)) -> Result<(), Error> {
-println!("=== {:?} -> {:?}: {}", msg.0, msg.1, msg.2);
 			let mut is_queued_message = false;
 			loop {
 				match self.nodes[&msg.1].session.on_message(&msg.0, &msg.2) {
@@ -1244,7 +1246,7 @@ println!("=== {:?} -> {:?}: {}", msg.0, msg.1, msg.2);
 	fn prepare_signing_sessions(threshold: usize, num_nodes: usize) -> (KeyGenerationMessageLoop, MessageLoop) {
 		// run key generation sessions
 		let mut gl = KeyGenerationMessageLoop::new(num_nodes);
-		gl.master().initialize(Public::default(), false, threshold, gl.nodes.keys().cloned().collect()).unwrap();
+		gl.master().initialize(Public::default(), false, threshold, gl.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).unwrap();
 		while let Some((from, to, message)) = gl.take_message() {
 			gl.process_message((from, to, message)).unwrap();
 		}
@@ -1276,228 +1278,3 @@ println!("=== {:?} -> {:?}: {}", msg.0, msg.1, msg.2);
 		}
 	}
 }
-
-/*
-
-=== M -> a: EcdsaSigning.EcdsaSigningConsensusMessage.InitializeConsensusSession
-=== M -> b: EcdsaSigning.EcdsaSigningConsensusMessage.InitializeConsensusSession
-=== M -> c: EcdsaSigning.EcdsaSigningConsensusMessage.InitializeConsensusSession
-=== M -> d: EcdsaSigning.EcdsaSigningConsensusMessage.InitializeConsensusSession
-=== a -> M: EcdsaSigning.EcdsaSigningConsensusMessage.ConfirmConsensusInitialization(true)
-=== b -> M: EcdsaSigning.EcdsaSigningConsensusMessage.ConfirmConsensusInitialization(true)
-=== c -> M: EcdsaSigning.EcdsaSigningConsensusMessage.ConfirmConsensusInitialization(true)
-=== d -> M: EcdsaSigning.EcdsaSigningConsensusMessage.ConfirmConsensusInitialization(true)
-=== M -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.InitializeSession
-=== M -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.InitializeSession
-=== M -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.InitializeSession
-=== a -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.ConfirmInitialization
-=== M -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.InitializeSession
-=== a -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.ConfirmInitialization
-=== M -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.InitializeSession
-=== a -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.ConfirmInitialization
-=== M -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.InitializeSession
-=== b -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.ConfirmInitialization
-=== M -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.InitializeSession
-=== b -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.ConfirmInitialization
-=== M -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.InitializeSession
-=== b -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.ConfirmInitialization
-=== M -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.InitializeSession
-=== c -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.ConfirmInitialization
-=== M -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.InitializeSession
-=== c -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.ConfirmInitialization
-=== M -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.InitializeSession
-=== c -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.ConfirmInitialization
-=== M -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.InitializeSession
-=== d -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.ConfirmInitialization
-=== M -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.CompleteInitialization
-=== M -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.CompleteInitialization
-=== M -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.CompleteInitialization
-=== M -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.CompleteInitialization
-=== M -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== M -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== M -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== M -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== a -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== a -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== a -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== a -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== b -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== b -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== b -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== b -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== c -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== c -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== c -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== c -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== d -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.ConfirmInitialization
-=== M -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.CompleteInitialization
-=== M -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.CompleteInitialization
-=== M -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.CompleteInitialization
-=== M -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.CompleteInitialization
-=== M -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== M -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== M -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== M -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== a -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== a -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== a -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== a -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== b -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== b -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== b -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== b -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== c -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== c -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== c -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== c -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== d -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.ConfirmInitialization
-=== M -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.CompleteInitialization
-=== M -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.CompleteInitialization
-=== M -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.CompleteInitialization
-=== M -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.CompleteInitialization
-=== M -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== M -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== M -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== M -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== a -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== a -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== a -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== a -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== b -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== b -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== b -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== b -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== c -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== c -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== c -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== c -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== d -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== M -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== M -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== M -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== M -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== d -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== a -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== a -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== a -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== a -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== d -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== b -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== b -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== b -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== b -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== d -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.KeysDissemination
-=== c -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== c -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== c -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== c -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== d -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== M -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== M -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== M -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== M -> d: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== d -> a: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== a -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== d -> b: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== b -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== d -> c: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.PublicKeyShare
-=== c -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== M -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== M -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== M -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== M -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== d -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== a -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== a -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== a -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== a -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== d -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== b -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== b -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== b -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== b -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== d -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.KeysDissemination
-=== c -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== c -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== c -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== c -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== d -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== M -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== M -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== M -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== M -> d: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== d -> a: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== a -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== d -> b: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== b -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== d -> c: EcdsaSigning.EcdsaInversionNonceGenerationMessage.PublicKeyShare
-=== c -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== M -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== M -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== M -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== M -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== d -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== a -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== a -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== a -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== a -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== d -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== b -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== b -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== b -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== b -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== d -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.KeysDissemination
-=== c -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== c -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== c -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== c -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== d -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== M -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== M -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== M -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== M -> d: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d: nonce_share=cfe6a8c05848b0dd931b3fb08ea1d1de64cf3dbeda42bf3944ee42ec82506b25
-=== d: inv_nonce_share=143f9bb227cb826595295e87c69793ac6b46ab5c48b6f13820459bd1961e8436
-=== d: inv_zero_share=071d9627b80e55a8285b29e7e781c73a3ee71952d7d7a1b48049648ff6e4efc3
-=== d -> a: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== a: nonce_share=c4bd58b2f4589b7ef685592c44e55257782032aed3bba66e0173cab778702c5e
-=== a: inv_nonce_share=6ae4daa7bb16154fef08cba38251935b76f9f7c2b9c627a8ce849245bce784cc
-=== a: inv_zero_share=0e506badd592f638322ff4eb9da2ac1964b647012ef6b586074e32e2825d0e56
-=== a -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d -> b: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== b: nonce_share=0e394007b322a6bab7006551bfa5f99bea783749e852cff44b701cf6637d27f4
-=== b: inv_nonce_share=141f80f0e26861676b622959a52fd853baa5251526f22527b9b36c6b422a2023
-=== b: inv_zero_share=0f50bfdcc207985dc29f2907de543b5e25917ba40b5834e9fbcbe85f8b8f4644
-=== b -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d -> c: EcdsaSigning.EcdsaInversionZeroGenerationMessage.PublicKeyShare
-=== c: nonce_share=703fa05efafc61dd2a9378afa08d98864eb1cb8084ef16764ba4e89480d80686
-=== c: inv_nonce_share=39ebe7afc6dffced32b9a9744dc4913ceed0d485b57e2d577516504e67da8dbb
-=== c: inv_zero_share=c040a5f3575d5987d6f8541255d26f66cb77f8a4f445cebfe4a947463154cc39
-=== c -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaSignatureNonceGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaInversionNonceGenerationMessage.SessionCompleted
-=== d -> M: EcdsaSigning.EcdsaInversionZeroGenerationMessage.SessionCompleted
-=== M: nonce_share=339434da07db1079f4f730ba79cf972f0b4c7dd3edb32ffcb40bc813035bb656
-=== M: inv_nonce_share=a14e441f6cd71ace97b51bd2637874b28bff9a63a0a6f4f7bb5dab8bde3abcb5
-=== M: inv_zero_share=2b3626b9588b1cce0d8a8e1ca41114e36996bdba441dd368cf82bd83f4fc7163
-=== partial_signature_s(nonce_public=05851932b28617e16ecf87afcbe502a8ac47e40a7a6aba11231364e2ec618fa2d3421b4681edbee4f0dc01f1001a2cb0048830ff52a2796994e0d4b74f63a99d, inv_nonce_share=a14e441f6cd71ace97b51bd2637874b28bff9a63a0a6f4f7bb5dab8bde3abcb5, secret_share=586a58a5f60e7b4b97d95ba4449f45dfe0b158db64d5bb5ebcf917104f27d23e) = Secret: 0x64ae..9d6e
-=== M -> a: EcdsaSigning.EcdsaRequestPartialSignature
-=== partial_signature_s(nonce_public=05851932b28617e16ecf87afcbe502a8ac47e40a7a6aba11231364e2ec618fa2d3421b4681edbee4f0dc01f1001a2cb0048830ff52a2796994e0d4b74f63a99d, inv_nonce_share=6ae4daa7bb16154fef08cba38251935b76f9f7c2b9c627a8ce849245bce784cc, secret_share=bca9a64c446b6c9adb93fb5ce40bbceb28d45fcbc04cc5546a6101d480ff82dc) = Secret: 0xea82..b26e
-=== M -> b: EcdsaSigning.EcdsaRequestPartialSignature
-=== partial_signature_s(nonce_public=05851932b28617e16ecf87afcbe502a8ac47e40a7a6aba11231364e2ec618fa2d3421b4681edbee4f0dc01f1001a2cb0048830ff52a2796994e0d4b74f63a99d, inv_nonce_share=141f80f0e26861676b622959a52fd853baa5251526f22527b9b36c6b422a2023, secret_share=fbfb1ff207ccd3f339c4d8ab3b64c1f4dee941660a8823b6279c1bb66f925613) = Secret: 0x717b..3a8
-=== M -> c: EcdsaSigning.EcdsaRequestPartialSignature
-=== partial_signature_s(nonce_public=05851932b28617e16ecf87afcbe502a8ac47e40a7a6aba11231364e2ec618fa2d3421b4681edbee4f0dc01f1001a2cb0048830ff52a2796994e0d4b74f63a99d, inv_nonce_share=39ebe7afc6dffced32b9a9744dc4913ceed0d485b57e2d577516504e67da8dbb, secret_share=bf79c369f6cb21df02f7d36dd45253c16b666e29c3af0278481a9bb48cd75a0b) = Secret: 0x62b8..3ce
-=== M -> d: EcdsaSigning.EcdsaRequestPartialSignature
-=== partial_signature_s(nonce_public=05851932b28617e16ecf87afcbe502a8ac47e40a7a6aba11231364e2ec618fa2d3421b4681edbee4f0dc01f1001a2cb0048830ff52a2796994e0d4b74f63a99d, inv_nonce_share=143f9bb227cb826595295e87c69793ac6b46ab5c48b6f13820459bd1961e8436, secret_share=ed88dbfdce641d7c55cfb38f57abe988b466195f576321288956853f2726024b) = Secret: 0xf941..ef91
-=== a -> M: EcdsaSigning.EcdsaPartialSignature
-=== b -> M: EcdsaSigning.EcdsaPartialSignature
-=== c -> M: EcdsaSigning.EcdsaPartialSignature
-=== d -> M: EcdsaSigning.EcdsaPartialSignature
-=== M -> a: EcdsaSigning.EcdsaSigningSessionCompleted
-=== M -> b: EcdsaSigning.EcdsaSigningSessionCompleted
-=== M -> c: EcdsaSigning.EcdsaSigningSessionCompleted
-=== M -> d: EcdsaSigning.EcdsaSigningSessionCompleted
-
-*/
