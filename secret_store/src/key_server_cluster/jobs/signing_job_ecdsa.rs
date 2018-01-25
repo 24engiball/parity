@@ -113,7 +113,7 @@ impl JobExecutor for EcdsaSigningJob {
 			&inversed_nonce_coeff_mul_nonce,
 			&inv_nonce_mul_secret,
 			&signature_r,
-			&partial_request.message_hash,
+			&math::to_scalar(partial_request.message_hash)?,
 		)?;
 
 		Ok(JobPartialRequestAction::Respond(EcdsaPartialSigningResponse {
@@ -136,9 +136,6 @@ impl JobExecutor for EcdsaSigningJob {
 		if partial_responses.keys().any(|n| !key_version.id_numbers.contains_key(n)) {
 			return Err(Error::InvalidMessage);
 		}
-
-		/*let message_hash = self.message_hash.as_ref()
-			.expect("compute_response is only called on master nodes; message_hash is filed in constructor on master nodes; qed");*/
 
 		let id_numbers: Vec<_> = partial_responses.keys().map(|n| key_version.id_numbers[n].clone()).collect();
 		let signature_s_shares: Vec<_> = partial_responses.values().map(|r| r.partial_signature_s.clone()).collect();

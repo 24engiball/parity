@@ -33,6 +33,15 @@ pub fn zero_scalar() -> Secret {
 	Secret::zero()
 }
 
+/// Convert hash to EC scalar (modulo curve order).
+pub fn to_scalar(hash: H256) -> Result<Secret, Error> {
+	let scalar: U256 = hash.into();
+	let scalar: H256 = (scalar % math::curve_order()).into();
+	let scalar = Secret::from_slice(&*scalar);
+	scalar.check_validity()?;
+	Ok(scalar)
+}
+
 /// Generate random scalar.
 pub fn generate_random_scalar() -> Result<Secret, Error> {
 	Ok(Random.generate()?.secret().clone())
@@ -353,12 +362,7 @@ pub fn combine_message_hash_with_public(message_hash: &H256, public: &Public) ->
 	let hash = keccak(&buffer[..]);
 
 	// map hash to EC finite field value
-	let hash: U256 = hash.into();
-	let hash: H256 = (hash % math::curve_order()).into();
-	let hash = Secret::from_slice(&*hash);
-	hash.check_validity()?;
-
-	Ok(hash)
+	to_scalar(hash)
 }
 
 /// Compute Schnorr signature share.
@@ -429,23 +433,14 @@ pub fn verify_schnorr_signature(public: &Public, signature: &(Secret, Secret), m
 	Ok(combined_hash == signature.0)
 }
 
+
 /// Compute R part of ECDSA signature.
 pub fn compute_ecdsa_r(nonce_public: &Public) -> Result<Secret, Error> {
-	let signature_r = &nonce_public[0..32];
-	let signature_r: U256 = signature_r.into();
-	let signature_r: H256 = (signature_r % math::curve_order()).into();
-	let signature_r = Secret::from_slice(&*signature_r);
-	signature_r.check_validity()?;
-	Ok(signature_r)
+	to_scalar(nonce_public[0..32].into())
 }
 
 /// Compute share of S part of ECDSA signature.
-pub fn compute_ecdsa_s_share(inv_nonce_share: &Secret, inv_nonce_mul_secret: &Secret, signature_r: &Secret, message_hash: &H256) -> Result<Secret, Error> {
-	let message_hash: U256 = message_hash.clone().into();
-	let message_hash: H256 = (message_hash % math::curve_order()).into();
-	let message_hash = Secret::from_slice(&*message_hash);
-	message_hash.check_validity()?;
-
+pub fn compute_ecdsa_s_share(inv_nonce_share: &Secret, inv_nonce_mul_secret: &Secret, signature_r: &Secret, message_hash: &Secret) -> Result<Secret, Error> {
 	let mut nonce_inv_share_mul_message_hash = inv_nonce_share.clone();
 	nonce_inv_share_mul_message_hash.mul(&message_hash.clone().into())?;
 
@@ -461,7 +456,6 @@ pub fn compute_ecdsa_s_share(inv_nonce_share: &Secret, inv_nonce_mul_secret: &Se
 /// Compute S part of ECDSA signature from shares.
 pub fn compute_ecdsa_s(t: usize, signature_s_shares: &[Secret], id_numbers: &[Secret]) -> Result<Secret, Error> {
 	let double_t = t * 2;
-	debug_assert!(signature_s_shares.len() >= double_t + 1);
 	debug_assert!(id_numbers.len() >= double_t + 1);
 	debug_assert_eq!(signature_s_shares.len(), id_numbers.len());
 
@@ -531,13 +525,10 @@ pub fn compute_inversed_secret_coeff_from_shares(t: usize, id_numbers: &[Secret]
 	Ok(u_inv)
 }
 
-/// TODO
-//pub fn compute_ecdsa_inversed_nonce_share()
-
 #[cfg(test)]
 pub mod tests {
 	use std::iter::once;
-	use ethkey::{KeyPair, Signature, recover, verify_public};
+	use ethkey::{KeyPair, recover, verify_public};
 	use super::*;
 
 	#[derive(Clone)]
@@ -884,63 +875,53 @@ pub mod tests {
 
 	#[test]
 	fn full_ecdsa_signature_math_session() {
-		// TODO: different schemes!!!
-		// TODO: case when message hash is > curve_order!!!
-		let (t, n) = (2, 5);
+		let test_cases = [(2, 5), (2, 6), (3, 11), (4, 11)];
+		for &(t, n) in &test_cases {
+			// values that can be hardcoded
+			let joint_secret: Secret = Random.generate().unwrap().secret().clone();
+			let joint_nonce: Secret = Random.generate().unwrap().secret().clone();
+			let message_hash: H256 = H256::random();
 
-		// values that can be hardcoded
-		let joint_secret: Secret = Random.generate().unwrap().secret().clone();
-		let joint_nonce: Secret = Random.generate().unwrap().secret().clone();
-		let message_hash = Random.generate().unwrap().secret().clone();
+			// convert message hash to EC scalar
+			let message_hash_scalar = to_scalar(message_hash.clone()).unwrap();
 
-		// generate secret key shares
-		let artifacts = run_key_generation(t, n, None, Some(joint_secret));
+			// generate secret key shares
+			let artifacts = run_key_generation(t, n, None, Some(joint_secret));
 
-		// generate nonce shares
-		let nonce_artifacts = run_key_generation(t, n, Some(artifacts.id_numbers.clone()), Some(joint_nonce));
+			// generate nonce shares
+			let nonce_artifacts = run_key_generation(t, n, Some(artifacts.id_numbers.clone()), Some(joint_nonce));
 
-		// compute public nonce shares
-		let nonce_public_shadows: Vec<_> = (0..n).map(|i| compute_shadow_mul(&nonce_artifacts.secret_shares[i],
-			&nonce_artifacts.id_numbers[i],
-			nonce_artifacts.id_numbers.iter().enumerate()
-				.filter(|&(j, _)| j != i)
-				.map(|(_, id)| id))
-				.unwrap()).collect();
-		let nonce_public_shares: Vec<_> = nonce_public_shadows.iter()
-			.map(|shadow| compute_public_share(shadow).unwrap())
-			.collect();
+			// compute nonce public
+			// x coordinate (mapped to EC field) of this public is the r-portion of signature
+			let nonce_public_shares: Vec<_> = (0..n).map(|i| compute_public_share(&nonce_artifacts.polynoms1[i][0]).unwrap()).collect();
+			let nonce_public = compute_joint_public(nonce_public_shares.iter()).unwrap();
+			let signature_r = compute_ecdsa_r(&nonce_public).unwrap();
 
-		// compute public nonce on every node
-		// x coordinate (mapped to EC field) of this public is the r-portion of signature
-		let nonce_public = compute_public_sum(nonce_public_shares.iter()).unwrap();
-		let signature_r = compute_ecdsa_r(&nonce_public).unwrap();
+			// compute shares of 1/nonce so that both nonce && 1/nonce are still unknown to all nodes
+			let nonce_inv_shares = run_reciprocal_protocol(t, &nonce_artifacts);
 
-		// compute shares of 1/nonce so that both nonce && 1/nonce are still unknown to all nodes
-		let nonce_inv_shares = run_reciprocal_protocol(t, &nonce_artifacts);
+			// compute multiplication of secret-shares * inv-nonce-shares
+			let mul_shares = run_multiplication_protocol(t, &artifacts.secret_shares, &nonce_inv_shares);
 
-		// compute multiplication of secret-shares * inv-nonce-shares
-		let mul_shares = run_multiplication_protocol(t, &artifacts.secret_shares, &nonce_inv_shares);
-
-		// compute shares for s portion of signature: nonce_inv * (message_hash + secret * signature_r)
-		// every node broadcasts this share
-		let message_hash: Secret = message_hash.into();
-		let signature_s_shares: Vec<_> = (0..n).map(|i| {
-			compute_ecdsa_s_share(
+			// compute shares for s portion of signature: nonce_inv * (message_hash + secret * signature_r)
+			// every node broadcasts this share
+			let signature_s_shares: Vec<_> = (0..n).map(|i| compute_ecdsa_s_share(
 				&nonce_inv_shares[i],
 				&mul_shares[i],
 				&signature_r,
-				&message_hash).unwrap()
-		}).collect();
+				&message_hash_scalar
+			).unwrap()).collect();
 
-		// compute signature_s from received shares
-		let signature_s = compute_ecdsa_s(t, &signature_s_shares, &artifacts.id_numbers).unwrap();
+			// compute signature_s from received shares
+			let signature_s = compute_ecdsa_s(t, &signature_s_shares, &artifacts.id_numbers).unwrap();
 
-		// check signature
-		let signature_actual = serialize_ecdsa_signature(&nonce_public, signature_r, signature_s);
-		let joint_secret = compute_joint_secret(artifacts.polynoms1.iter().map(|p| &p[0])).unwrap();
-		let joint_secret_pair = KeyPair::from_secret(joint_secret).unwrap();
-		assert_eq!(recover(&signature_actual, &message_hash).unwrap(), *joint_secret_pair.public());
-		assert!(verify_public(joint_secret_pair.public(), &signature_actual, &message_hash).unwrap());
+			// check signature
+			let signature_actual = serialize_ecdsa_signature(&nonce_public, signature_r, signature_s);
+			let joint_secret = compute_joint_secret(artifacts.polynoms1.iter().map(|p| &p[0])).unwrap();
+			let joint_secret_pair = KeyPair::from_secret(joint_secret).unwrap();
+			assert_eq!(recover(&signature_actual, &message_hash).unwrap(), *joint_secret_pair.public());
+			assert!(verify_public(joint_secret_pair.public(), &signature_actual, &message_hash).unwrap());
+		}
 	}
 
 	#[test]
@@ -1063,7 +1044,7 @@ pub mod tests {
 
 	#[test]
 	fn full_generation_with_reciprocal() {
-		let test_cases = vec![(1, 3), (2, 5), (2, 7), (3, 8)];
+		let test_cases = vec![(1, 3), (2, 5), (2, 7), (2, 7), (3, 8)];
 		for (t, n) in test_cases {
 			// generate shared secret
 			let artifacts = run_key_generation(t, n, None, None);

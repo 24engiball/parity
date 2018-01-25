@@ -914,12 +914,6 @@ impl SessionImpl {
 
 	/// Broadcast inversed nonce share.
 	fn send_inversed_nonce_coeff_share(core: &SessionCore, data: &mut SessionData) -> Result<(), Error> {
-		let key_share = match core.key_share.as_ref() {
-			None => return Err(Error::InvalidMessage),
-			Some(key_share) => key_share,
-		};
-		let key_version = key_share.version(data.version.as_ref().expect("TODO")).map_err(|e| Error::KeyStorage(e.into()))?;
-
 		let sig_nonce_generation_session = data.sig_nonce_generation_session.as_ref().expect("TODO");
 		let sig_nonce = sig_nonce_generation_session.joint_public_and_secret().expect("TODO").expect("TODO").2;
 
@@ -1258,8 +1252,7 @@ mod tests {
 
 	#[test]
 	fn complete_gen_ecdsa_sign_session() {
-		let test_cases = [(2, 5)];
-		//let test_cases = [(0, 1), (0, 5), (2, 5), (3, 5)];
+		let test_cases = [(2, 5), (2, 6), (3, 11), (4, 11)];
 		for &(threshold, num_nodes) in &test_cases {
 			let (gl, mut sl) = prepare_signing_sessions(threshold, num_nodes);
 			let key_pair = gl.compute_key_pair(threshold);
@@ -1272,7 +1265,6 @@ mod tests {
 			}
 
 			// verify signature
-			let public = gl.master().joint_public_and_secret().unwrap().unwrap().0;
 			let signature = sl.master().wait().unwrap();
 			assert!(verify_public(key_pair.public(), &signature, &message_hash).unwrap());
 		}
